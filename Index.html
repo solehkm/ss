@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<title>Sticker Counter - Live Camera</title>
+<style>
+  body { font-family: Arial, sans-serif; max-width: 700px; margin: 15px auto; padding: 0 12px; }
+  h2 { margin-bottom: 4px; }
+  .status { color: #666; font-size: 14px; margin-bottom: 10px; min-height: 18px; }
+  .video-wrap { position: relative; }
+  video { display: none; }
+  #outCanvas { width: 100%; border-radius: 8px; border: 1px solid #ccc; background: #000; }
+  .state-badge {
+    position: absolute; top: 10px; left: 10px; padding: 6px 14px; border-radius: 20px;
+    font-weight: bold; font-size: 13px; color: white;
+  }
+  .state-armed { background: #2d9d3a; }
+  .state-locked { background: #c99b00; }
+  .state-idle { background: #888; }
+  .controls { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+  button { flex: 1; min-width: 90px; padding: 12px; font-size: 15px; border: none; border-radius: 8px; color: white; cursor: pointer; }
+  #startBtn { background: #2d6cdf; }
+  #stopBtn { background: #d9534f; }
+  #resetBtn { background: #777; }
+  button:disabled { background: #ccc; }
+  .result-box { background: #f4f4f4; padding: 18px; border-radius: 10px; margin-top: 15px; text-align: center; }
+  .total-num { font-size: 48px; font-weight: bold; color: #2d6cdf; }
+  .breakdown { display: flex; justify-content: center; gap: 25px; margin-top: 8px; font-size: 15px; color: #444; }
+  .adv { margin-top: 12px; font-size: 13px; color: #888; }
+  .adv label { display: block; margin: 4px 0; }
+</style>
+</head>
+<body>
+
+<h2>Sticker Counter - Live Scan</h2>
+<div class="status" id="cvStatus">Loading OpenCV.js...</div>
+
+<div class="video-wrap">
+  <video id="video" playsinline autoplay muted></video>
+  <canvas id="outCanvas"></canvas>
+  <div class="state-badge state-idle" id="stateBadge">IDLE</div>
+</div>
+
+<div class="controls">
+  <button id="startBtn" disabled>▶ Start Scan</button>
+  <button id="stopBtn" disabled>⏹ Stop</button>
+  <button id="resetBtn">↺ Reset</button>
+</div>
+
+<div class="result-box">
+  <div class="total-num" id="totalCount">0</div>
+  <div style="color:#666;">Total Sticker</div>
+  <div class="breakdown">
+    <div>🔵 Lingkaran: <b id="circleTotal">0</b></div>
+    <div>◻️ Persegi: <b id="squareTotal">0</b></div>
+  </div>
+</div>
+
+<details class="adv">
+  <summary>Pengaturan Lanjutan (tuning)</summary>
+  <label>Threshold blok: <input type="range" id="threshVal" min="0" max="255" value="120"></label>
+  <label>Min Area objek: <input type="range" id="minArea" min="50" max="5000" step="50" value="300"></label>
+  <label>Stabilitas (frame): <input type="range" id="stableFrames" min="5" max="40" value="15"></label>
+</details>
+
+<script src="https://docs.opencv.org/4.9.0/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+<script>
+let cvReady = false;
+let stream = null;
+let scanning = false;
+let rafId = null;
+
+// State machine: 'idle' -> belum start | 'armed' -> siap hitung batch baru | 'locked' -> sudah dihitung, nunggu scene berubah
+let state = 'idle';
+let stableCount = 0;      // jumlah objek yang terdeteksi stabil saat ini
+let stableFrameHits = 0;  // berapa frame berturut2 count-nya sama
+let lastCount = -1;
+
+let totalCircle = 0;
+let totalSquare = 0;
+
+function onOpenCvReady() {
+  cv['onRuntimeInitialized'] = () => {
+    cvReady = true;
+    document.getElementById('cvStatus').textContent = 'Siap. Klik "Start Scan" untuk mengaktifkan kamera.';
+    document.getElementById('startBtn').disabled = false;
+  };
+}
+
+document.getElementById('startBtn').addEventListener('click', startCamera);
+document.getElementById('stopBtn').addEventListener('click', stopCamera);
+document.getElementById('resetBtn').addEventListener('click', resetAll);
+
+async function startCamera() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+    });
+  } catch (err) {
+    document.getElementById('cvStatus').textContent = 'Gagal akses kamera: ' + err.message;
+    return;
+  }
+  const video = document.getElementById('video');
+  video.srcObject = stream;
+  await video.play();
+
+  const canvas = document.getElementById('outCanvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+
+  scanning = true;
+  state = 'armed';
+  setBadge('armed');
+  document.getElementById('startBtn').disabled = true;
+  document.getElementById('stopBtn').disabled = false;
+  document.getElementById('cvStatus').textContent = 'Scanning aktif. Tunjukkan sticker ke kamera.';
+
+  loop();
+}
+
+function stopCamera() {
+  scanning = false;
+  if (rafId) cancelAnimationFrame(rafId);
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  state = 'idle';
+  setBadge('idle');
+  document.getElementById('startBtn').disabled = false;
+  document.getElementById('stopBtn').disabled = true;
+  document.getElementById('cvStatus').textContent = 'Scan dihentikan. Total tersimpan.';
+}
+
+function resetAll() {
+  totalCircle = 0;
+  totalSquare = 0;
+  stableCount = 0;
+  stableFrameHits = 0;
+  lastCount = -1;
+  updateDisplay();
+  if (scanning) { state = 'armed'; setBadge('armed'); }
+}
+
+function setBadge(s) {
+  const el = document.getElementById('stateBadge');
+  el.className = 'state-badge state-' + s;
+  el.textContent = s === 'armed' ? 'ARMED - siap hitung' : s === 'locked' ? 'LOCKED - terhitung' : 'IDLE';
+}
+
+function updateDisplay() {
+  document.getElementById('circleTotal').textContent = totalCircle;
+  document.getElementById('squareTotal').textContent = totalSquare;
+  document.getElementById('totalCount').textContent = totalCircle + totalSquare;
+}
+
+function loop() {
+  if (!scanning) return;
+  processFrame();
+  rafId = requestAnimationFrame(loop);
+}
+
+function processFrame() {
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('outCanvas');
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+  const threshVal = parseInt(document.getElementById('threshVal').value);
+  const minArea = parseInt(document.getElementById('minArea').value);
+  const stableThreshold = parseInt(document.getElementById('stableFrames').value);
+
+  let src = cv.imread(canvas);
+  let gray = new cv.Mat();
+  let blurred = new cv.Mat();
+  let thresh = new cv.Mat();
+  let contours = new cv.MatVector();
+  let hierarchy = new cv.Mat();
+
+  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+  cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+  cv.adaptiveThreshold(blurred, thresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 21, 5);
+  cv.findContours(thresh, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+  let circleN = 0, squareN = 0, validObjects = 0;
+
+  for (let i = 0; i < contours.size(); i++) {
+    const cnt = contours.get(i);
+    const area = cv.contourArea(cnt);
+    if (area < minArea) { cnt.delete(); continue; }
+
+    const perimeter = cv.arcLength(cnt, true);
+    const circularity = perimeter > 0 ? (4 * Math.PI * area) / (perimeter * perimeter) : 0;
+    let approx = new cv.Mat();
+    cv.approxPolyDP(cnt, approx, 0.03 * perimeter, true);
+    const corners = approx.rows;
+    const rect = cv.boundingRect(cnt);
+    const aspectRatio = rect.width / rect.height;
+
+    let color, isValid = true;
+    if (circularity > 0.82) {
+      circleN++; color = new cv.Scalar(255, 0, 0, 255);
+    } else if (corners >= 4 && corners <= 8 && aspectRatio > 0.75 && aspectRatio < 1.33) {
+      squareN++; color = new cv.Scalar(0, 128, 255, 255);
+    } else {
+      isValid = false; color = new cv.Scalar(0, 200, 0, 255);
+    }
+
+    if (isValid) validObjects++;
+
+    let vec = new cv.MatVector(); vec.push_back(cnt);
+    cv.drawContours(src, vec, 0, color, 2);
+    vec.delete(); approx.delete(); cnt.delete();
+  }
+
+  cv.imshow('outCanvas', src);
+  src.delete(); gray.delete(); blurred.delete(); thresh.delete();
+  contours.delete(); hierarchy.delete();
+
+  // --- STATE MACHINE ---
+  const currentCount = circleN + squareN;
+
+  if (state === 'armed') {
+    if (currentCount === lastCount && currentCount > 0) {
+      stableFrameHits++;
+    } else {
+      stableFrameHits = 0;
+    }
+    lastCount = currentCount;
+
+    if (stableFrameHits >= stableThreshold) {
+      // Commit hasil ke total
+      totalCircle += circleN;
+      totalSquare += squareN;
+      updateDisplay();
+      state = 'locked';
+      setBadge('locked');
+      document.getElementById('cvStatus').textContent =
+        `+${currentCount} tersimpan. Angkat sticker untuk batch berikutnya.`;
+      stableFrameHits = 0;
+      lastCount = -1;
+    }
+  } else if (state === 'locked') {
+    // Tunggu scene jadi kosong (atau berubah signifikan) baru re-arm
+    if (currentCount === 0) {
+      stableFrameHits++;
+      if (stableFrameHits >= 8) { // lebih cepat re-arm saat scene kosong
+        state = 'armed';
+        setBadge('armed');
+        stableFrameHits = 0;
+        lastCount = -1;
+        document.getElementById('cvStatus').textContent = 'Siap untuk batch sticker berikutnya.';
+      }
+    } else {
+      stableFrameHits = 0;
+    }
+  }
+}
+</script>
+
+</body>
+</html>
