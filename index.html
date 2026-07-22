@@ -17,6 +17,11 @@
   .state-armed { background: #2d9d3a; }
   .state-locked { background: #c99b00; }
   .state-idle { background: #888; }
+  .debug-badge {
+    position: absolute; top: 10px; right: 10px; padding: 6px 12px; border-radius: 8px;
+    font-size: 13px; font-weight: bold; color: white; background: rgba(0,0,0,0.65);
+    font-family: monospace;
+  }
   .controls { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
   button { flex: 1; min-width: 90px; padding: 12px; font-size: 15px; border: none; border-radius: 8px; color: white; cursor: pointer; }
   #startBtn { background: #2d6cdf; }
@@ -39,6 +44,7 @@
   <video id="video" playsinline autoplay muted></video>
   <canvas id="outCanvas"></canvas>
   <div class="state-badge state-idle" id="stateBadge">IDLE</div>
+  <div class="debug-badge" id="debugBadge">-</div>
 </div>
 
 <div class="controls">
@@ -194,9 +200,9 @@ function processFrame() {
     const aspectRatio = rect.width / rect.height;
 
     let color, isValid = true;
-    if (circularity > 0.82) {
+    if (circularity > 0.72) {
       circleN++; color = new cv.Scalar(255, 0, 0, 255);
-    } else if (corners >= 4 && corners <= 8 && aspectRatio > 0.75 && aspectRatio < 1.33) {
+    } else if (corners >= 4 && corners <= 8 && aspectRatio > 0.55 && aspectRatio < 1.8) {
       squareN++; color = new cv.Scalar(0, 128, 255, 255);
     } else {
       isValid = false; color = new cv.Scalar(0, 200, 0, 255);
@@ -215,6 +221,9 @@ function processFrame() {
 
   // --- STATE MACHINE ---
   const currentCount = circleN + squareN;
+  const stableThresholdVal = parseInt(document.getElementById('stableFrames').value);
+  document.getElementById('debugBadge').textContent =
+    `Terdeteksi: ${currentCount} | Stabil: ${stableFrameHits}/${stableThresholdVal}`;
 
   if (state === 'armed') {
     if (currentCount === lastCount && currentCount > 0) {
