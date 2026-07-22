@@ -63,7 +63,6 @@
   <label>Stabilitas (frame): <input type="range" id="stableFrames" min="5" max="40" value="15"></label>
 </details>
 
-<script src="https://docs.opencv.org/4.9.0/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
 <script>
 let cvReady = false;
 let stream = null;
@@ -254,6 +253,20 @@ function processFrame() {
   }
 }
 </script>
+
+<script>
+  // Timeout untuk deteksi kalau CDN gagal load
+  window.cdnLoadTimeout = setTimeout(() => {
+    if (!cvReady) {
+      document.getElementById('cvStatus').textContent =
+        '⚠️ Gagal memuat OpenCV.js. Cek koneksi internet atau coba refresh halaman.';
+    }
+  }, 15000);
+</script>
+<script src="https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.12.0-release.1/dist/opencv.js"
+        onload="onOpenCvReady();"
+        onerror="document.getElementById('cvStatus').textContent='⚠️ CDN gagal dimuat (404/network error). Coba refresh atau ganti koneksi.';"
+        type="text/javascript"></script>
 
 </body>
 </html>
