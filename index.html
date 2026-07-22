@@ -60,6 +60,9 @@
     <div>🔵 Lingkaran: <b id="circleTotal">0</b></div>
     <div>◻️ Persegi: <b id="squareTotal">0</b></div>
   </div>
+  <div style="font-size:12px; color:#999; margin-top:6px;">
+    Garis tebal = dihitung sebagai objek (merah/biru/oranye). Garis tipis hijau = diabaikan (terlalu kecil, kemungkinan bukan sticker utuh).
+  </div>
 </div>
 
 <details class="adv">
@@ -182,8 +185,8 @@ function processFrame() {
   cv.adaptiveThreshold(blurred, thresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 21, 5);
   cv.findContours(thresh, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-  let circleN = 0, squareN = 0, validObjects = 0;
-
+  // --- PASS 1: kumpulkan semua kontur yang lolos filter area minimum ---
+  let candidates = [];
   for (let i = 0; i < contours.size(); i++) {
     const cnt = contours.get(i);
     const area = cv.contourArea(cnt);
@@ -196,22 +199,45 @@ function processFrame() {
     const corners = approx.rows;
     const rect = cv.boundingRect(cnt);
     const aspectRatio = rect.width / rect.height;
+    approx.delete();
 
-    let color, isValid = true;
-    if (circularity > 0.72) {
-      circleN++; color = new cv.Scalar(255, 0, 0, 255);
-    } else if (corners >= 4 && corners <= 8 && aspectRatio > 0.55 && aspectRatio < 1.8) {
-      squareN++; color = new cv.Scalar(0, 128, 255, 255);
+    candidates.push({ cnt, area, circularity, corners, aspectRatio, rect });
+  }
+
+  // --- Hitung luas referensi (median) sebagai acuan "ukuran sticker standar" ---
+  let refArea = 0;
+  if (candidates.length > 0) {
+    const areasSorted = candidates.map(c => c.area).sort((a, b) => a - b);
+    refArea = areasSorted[Math.floor(areasSorted.length / 2)]; // median
+  }
+
+  // --- PASS 2: objek dihitung valid kalau luasnya >=50% dari luas referensi ---
+  let circleN = 0, squareN = 0, validObjects = 0;
+
+  candidates.forEach(c => {
+    const sizeRatio = refArea > 0 ? (c.area / refArea) : 1;
+    const countedAsObject = sizeRatio >= 0.5;
+
+    let color, shapeLabel;
+    if (c.circularity > 0.72) {
+      shapeLabel = 'circle'; color = new cv.Scalar(255, 0, 0, 255);
+    } else if (c.corners >= 4 && c.corners <= 8 && c.aspectRatio > 0.55 && c.aspectRatio < 1.8) {
+      shapeLabel = 'square'; color = new cv.Scalar(0, 128, 255, 255);
     } else {
-      isValid = false; color = new cv.Scalar(0, 200, 0, 255);
+      shapeLabel = 'unknown'; color = new cv.Scalar(0, 200, 0, 255);
     }
 
-    if (isValid) validObjects++;
+    if (countedAsObject) {
+      validObjects++;
+      if (shapeLabel === 'square') squareN++; else circleN++; // unknown-tapi-valid dihitung sbg lingkaran (default)
+      // Beri highlight tebal kalau ini kontur "unknown" tapi tetap dihitung (area besar)
+      if (shapeLabel === 'unknown') color = new cv.Scalar(255, 165, 0, 255); // oranye = valid tapi bentuk tak jelas
+    }
 
-    let vec = new cv.MatVector(); vec.push_back(cnt);
-    cv.drawContours(src, vec, 0, color, 2);
-    vec.delete(); approx.delete(); cnt.delete();
-  }
+    let vec = new cv.MatVector(); vec.push_back(c.cnt);
+    cv.drawContours(src, vec, 0, color, countedAsObject ? 3 : 1);
+    vec.delete(); c.cnt.delete();
+  });
 
   cv.imshow('outCanvas', src);
   src.delete(); gray.delete(); blurred.delete(); thresh.delete();
