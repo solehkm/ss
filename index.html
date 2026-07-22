@@ -77,9 +77,9 @@ let rafId = null;
 
 // State machine: 'idle' -> belum start | 'armed' -> siap hitung batch baru | 'locked' -> sudah dihitung, nunggu scene berubah
 let state = 'idle';
-let stableCount = 0;      // jumlah objek yang terdeteksi stabil saat ini
-let stableFrameHits = 0;  // berapa frame berturut2 count-nya sama
-let lastCount = -1;
+let history = [];         // buffer {total, circleN, squareN} beberapa frame terakhir
+const HISTORY_WINDOW = 20; // jumlah frame yang dipantau untuk voting
+let emptyFrameHits = 0;    // untuk deteksi scene kosong saat locked
 
 let totalCircle = 0;
 let totalSquare = 0;
@@ -137,9 +137,8 @@ function stopCamera() {
 function resetAll() {
   totalCircle = 0;
   totalSquare = 0;
-  stableCount = 0;
-  stableFrameHits = 0;
-  lastCount = -1;
+  history = [];
+  emptyFrameHits = 0;
   updateDisplay();
   if (scanning) { state = 'armed'; setBadge('armed'); }
 }
@@ -170,7 +169,6 @@ function processFrame() {
 
   const threshVal = parseInt(document.getElementById('threshVal').value);
   const minArea = parseInt(document.getElementById('minArea').value);
-  const stableThreshold = parseInt(document.getElementById('stableFrames').value);
 
   let src = cv.imread(canvas);
   let gray = new cv.Mat();
@@ -219,45 +217,54 @@ function processFrame() {
   src.delete(); gray.delete(); blurred.delete(); thresh.delete();
   contours.delete(); hierarchy.delete();
 
-  // --- STATE MACHINE ---
+  // --- STATE MACHINE (majority-vote based, toleran terhadap noise antar-frame) ---
   const currentCount = circleN + squareN;
   const stableThresholdVal = parseInt(document.getElementById('stableFrames').value);
-  document.getElementById('debugBadge').textContent =
-    `Terdeteksi: ${currentCount} | Stabil: ${stableFrameHits}/${stableThresholdVal}`;
+  const windowNeeded = Math.max(stableThresholdVal, 10);
 
   if (state === 'armed') {
-    if (currentCount === lastCount && currentCount > 0) {
-      stableFrameHits++;
-    } else {
-      stableFrameHits = 0;
-    }
-    lastCount = currentCount;
+    history.push({ total: currentCount, circleN, squareN });
+    if (history.length > HISTORY_WINDOW) history.shift();
 
-    if (stableFrameHits >= stableThreshold) {
-      // Commit hasil ke total
-      totalCircle += circleN;
-      totalSquare += squareN;
+    // Hitung mode (nilai total yang paling sering muncul) dalam buffer
+    const freq = {};
+    history.forEach(h => { freq[h.total] = (freq[h.total] || 0) + 1; });
+    let modeTotal = 0, modeFreq = 0;
+    Object.keys(freq).forEach(k => {
+      if (freq[k] > modeFreq) { modeFreq = freq[k]; modeTotal = parseInt(k); }
+    });
+
+    const progress = modeFreq;
+    document.getElementById('debugBadge').textContent =
+      `Terdeteksi: ${currentCount} | Mode: ${modeTotal} | Stabil: ${progress}/${windowNeeded}`;
+
+    if (history.length >= windowNeeded && modeTotal > 0 && modeFreq >= windowNeeded * 0.7) {
+      // Ambil breakdown circle/square dari frame terakhir yang cocok dengan mode
+      const matchFrame = [...history].reverse().find(h => h.total === modeTotal) || { circleN: 0, squareN: 0 };
+      totalCircle += matchFrame.circleN;
+      totalSquare += matchFrame.squareN;
       updateDisplay();
       state = 'locked';
       setBadge('locked');
       document.getElementById('cvStatus').textContent =
-        `+${currentCount} tersimpan. Angkat sticker untuk batch berikutnya.`;
-      stableFrameHits = 0;
-      lastCount = -1;
+        `+${modeTotal} tersimpan. Angkat sticker untuk batch berikutnya.`;
+      history = [];
+      emptyFrameHits = 0;
     }
   } else if (state === 'locked') {
-    // Tunggu scene jadi kosong (atau berubah signifikan) baru re-arm
+    document.getElementById('debugBadge').textContent = `Terdeteksi: ${currentCount} | Menunggu scene kosong...`;
+    // Tunggu scene jadi kosong/minim objek baru re-arm
     if (currentCount === 0) {
-      stableFrameHits++;
-      if (stableFrameHits >= 8) { // lebih cepat re-arm saat scene kosong
+      emptyFrameHits++;
+      if (emptyFrameHits >= 8) {
         state = 'armed';
         setBadge('armed');
-        stableFrameHits = 0;
-        lastCount = -1;
+        history = [];
+        emptyFrameHits = 0;
         document.getElementById('cvStatus').textContent = 'Siap untuk batch sticker berikutnya.';
       }
     } else {
-      stableFrameHits = 0;
+      emptyFrameHits = 0;
     }
   }
 }
